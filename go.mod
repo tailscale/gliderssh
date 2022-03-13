@@ -1,4 +1,4 @@
-module github.com/gliderlabs/ssh
+module github.com/tailscale/ssh
 
 go 1.20
 
