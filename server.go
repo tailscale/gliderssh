@@ -38,8 +38,6 @@ type Server struct {
 	HostSigners []Signer // private keys for the host key, must have at least one
 	Version     string   // server version to be sent before the initial handshake
 
-	NoClientAuthCallback func(gossh.ConnMetadata) (*gossh.Permissions, error)
-
 	BannerHandler                 BannerHandler                 // server banner handler, overrides Banner
 	KeyboardInteractiveHandler    KeyboardInteractiveHandler    // keyboard-interactive authentication handler
 	PasswordHandler               PasswordHandler               // password authentication handler
@@ -131,10 +129,6 @@ func (srv *Server) config(ctx Context) *gossh.ServerConfig {
 	}
 	if srv.PasswordHandler == nil && srv.PublicKeyHandler == nil && srv.KeyboardInteractiveHandler == nil {
 		config.NoClientAuth = true
-	}
-	if srv.NoClientAuthCallback != nil {
-		config.NoClientAuth = true
-		config.NoClientAuthCallback = srv.NoClientAuthCallback
 	}
 	if srv.Version != "" {
 		config.ServerVersion = "SSH-2.0-" + srv.Version
