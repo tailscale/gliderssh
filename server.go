@@ -40,9 +40,11 @@ type Server struct {
 	Banner      string   // server banner
 
 	BannerHandler                 BannerHandler                 // server banner handler, overrides Banner
-	KeyboardInteractiveHandler    KeyboardInteractiveHandler    // keyboard-interactive authentication handler
+	KeyboardInteractiveHandler    KeyboardInteractiveHandler // keyboard-interactive authentication handler
+	BannerHandler                 BannerHandler
 	PasswordHandler               PasswordHandler               // password authentication handler
 	PublicKeyHandler              PublicKeyHandler              // public key authentication handler
+	NoClientAuthHandler           NoClientAuthHandler           // no client authentication handler
 	PtyCallback                   PtyCallback                   // callback for allowing PTY sessions, allows all if nil
 	ConnCallback                  ConnCallback                  // optional callback for wrapping net.Conn before handling
 	LocalPortForwardingCallback   LocalPortForwardingCallback   // callback for allowing local port forwarding, denies all if nil
@@ -172,6 +174,21 @@ func (srv *Server) config(ctx Context) *gossh.ServerConfig {
 				return ctx.Permissions().Permissions, fmt.Errorf("permission denied")
 			}
 			return ctx.Permissions().Permissions, nil
+		}
+	}
+	if srv.NoClientAuthHandler != nil {
+		config.NoClientAuthCallback = func(conn gossh.ConnMetadata) (*gossh.Permissions, error) {
+			applyConnMetadata(ctx, conn)
+			if err := srv.NoClientAuthHandler(ctx); err != nil {
+				return ctx.Permissions().Permissions, err
+			}
+			return ctx.Permissions().Permissions, nil
+		}
+	}
+	if srv.BannerHandler != nil {
+		config.BannerCallback = func(conn gossh.ConnMetadata) string {
+			applyConnMetadata(ctx, conn)
+			return srv.BannerHandler(ctx)
 		}
 	}
 	return config
