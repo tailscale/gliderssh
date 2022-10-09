@@ -39,8 +39,7 @@ type Server struct {
 	Version     string   // server version to be sent before the initial handshake
 
 	BannerHandler                 BannerHandler                 // server banner handler, overrides Banner
-	KeyboardInteractiveHandler    KeyboardInteractiveHandler // keyboard-interactive authentication handler
-	BannerHandler                 BannerHandler
+	KeyboardInteractiveHandler    KeyboardInteractiveHandler    // keyboard-interactive authentication handler
 	PasswordHandler               PasswordHandler               // password authentication handler
 	PublicKeyHandler              PublicKeyHandler              // public key authentication handler
 	NoClientAuthHandler           NoClientAuthHandler           // no client authentication handler
@@ -170,12 +169,6 @@ func (srv *Server) config(ctx Context) *gossh.ServerConfig {
 				return ctx.Permissions().Permissions, err
 			}
 			return ctx.Permissions().Permissions, nil
-		}
-	}
-	if srv.BannerHandler != nil {
-		config.BannerCallback = func(conn gossh.ConnMetadata) string {
-			applyConnMetadata(ctx, conn)
-			return srv.BannerHandler(ctx)
 		}
 	}
 	return config
