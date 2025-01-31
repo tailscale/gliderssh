@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"io/ioutil"
 	"net"
-	"io"
 	"strconv"
 	"strings"
 	"testing"
