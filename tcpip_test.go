@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"io"
 	"net"
-	"io"
 	"strconv"
 	"strings"
 	"testing"
