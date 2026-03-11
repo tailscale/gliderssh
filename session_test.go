@@ -230,9 +230,9 @@ func TestPty(t *testing.T) {
 
 func TestPtyResize(t *testing.T) {
 	t.Parallel()
-	winch0 := Window{40, 80}
-	winch1 := Window{80, 160}
-	winch2 := Window{20, 40}
+	winch0 := Window{Width: 40, Height: 80}
+	winch1 := Window{Width: 80, Height: 160, WidthPixels: 640, HeightPixels: 1280}
+	winch2 := Window{Width: 20, Height: 40, WidthPixels: 160, HeightPixels: 320}
 	winches := make(chan Window)
 	done := make(chan bool)
 	session, _, cleanup := newTestSession(t, &Server{
@@ -241,8 +241,15 @@ func TestPtyResize(t *testing.T) {
 			if !isPty {
 				t.Fatalf("expected pty but none requested")
 			}
-			if ptyReq.Window != winch0 {
-				t.Fatalf("expected window %#v but got %#v", winch0, ptyReq.Window)
+			// RequestPty computes pixel dimensions from char dimensions,
+			// so we only check Width/Height for the initial pty request.
+			if ptyReq.Window.Width != winch0.Width || ptyReq.Window.Height != winch0.Height {
+				t.Fatalf("expected window size %dx%d but got %dx%d",
+					winch0.Width, winch0.Height,
+					ptyReq.Window.Width, ptyReq.Window.Height)
+			}
+			if ptyReq.Window.WidthPixels == 0 || ptyReq.Window.HeightPixels == 0 {
+				t.Fatalf("expected non-zero pixel dimensions in pty request, got %#v", ptyReq.Window)
 			}
 			for win := range winCh {
 				winches <- win
@@ -259,11 +266,19 @@ func TestPtyResize(t *testing.T) {
 		t.Fatalf("expected nil but got %v", err)
 	}
 	gotWinch := <-winches
-	if gotWinch != winch0 {
-		t.Fatalf("expected window %#v but got %#v", winch0, gotWinch)
+	if gotWinch.Width != winch0.Width || gotWinch.Height != winch0.Height {
+		t.Fatalf("expected window size %dx%d but got %dx%d",
+			winch0.Width, winch0.Height,
+			gotWinch.Width, gotWinch.Height)
 	}
-	// winch1
-	winchMsg := struct{ w, h uint32 }{uint32(winch1.Width), uint32(winch1.Height)}
+	if gotWinch.WidthPixels == 0 || gotWinch.HeightPixels == 0 {
+		t.Fatalf("expected non-zero pixel dimensions, got %#v", gotWinch)
+	}
+	// winch1 — window-change sends all 4 fields per RFC 4254 section 6.7
+	winchMsg := struct{ W, H, Wpx, Hpx uint32 }{
+		uint32(winch1.Width), uint32(winch1.Height),
+		uint32(winch1.WidthPixels), uint32(winch1.HeightPixels),
+	}
 	ok, err := session.SendRequest("window-change", true, gossh.Marshal(&winchMsg))
 	if err == nil && !ok {
 		t.Fatalf("unexpected error or bad reply on send request")
@@ -273,7 +288,10 @@ func TestPtyResize(t *testing.T) {
 		t.Fatalf("expected window %#v but got %#v", winch1, gotWinch)
 	}
 	// winch2
-	winchMsg = struct{ w, h uint32 }{uint32(winch2.Width), uint32(winch2.Height)}
+	winchMsg = struct{ W, H, Wpx, Hpx uint32 }{
+		uint32(winch2.Width), uint32(winch2.Height),
+		uint32(winch2.WidthPixels), uint32(winch2.HeightPixels),
+	}
 	ok, err = session.SendRequest("window-change", true, gossh.Marshal(&winchMsg))
 	if err == nil && !ok {
 		t.Fatalf("unexpected error or bad reply on send request")

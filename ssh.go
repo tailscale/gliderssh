@@ -43,8 +43,6 @@ type PublicKeyHandler func(ctx Context, key PublicKey) error
 
 type NoClientAuthHandler func(ctx Context) error
 
-type BannerHandler func(ctx Context) string
-
 // PasswordHandler is a callback for performing password authentication.
 type PasswordHandler func(ctx Context, password string) bool
 

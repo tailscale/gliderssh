@@ -2,10 +2,10 @@
 Run docker containers over SSH.  You can even pipe things into them too!
 
 # Installation / Prep
-We're going to build JQ as an SSH service using the Glider Labs SSH package.  If you haven't installed GoLang and docker yet, see the doc's for help getting your environment setup.
+We're going to build JQ as an SSH service using the gliderssh package.  If you haven't installed Go and docker yet, see the docs for help getting your environment setup.
 
-Install the Glider Labs SSH package  
-`go get github.com/gliderlabs/ssh`
+Install the gliderssh package  
+`go get github.com/tailscale/gliderssh`
 
 Build the example docker container with  
 `docker build --rm -t jq .` 
@@ -88,7 +88,7 @@ JQ's help text!  It's working!  Now let's pipe some json into our SSH service an
 ```
 
 # Conclusion
-We built JQ as a service over SSH in Go using the Glider Labs SSH package.  We showed how you can run docker containers through the service as well as how to pipe stuff into your SSH service.  
+We built JQ as a service over SSH in Go using the gliderssh package.  We showed how you can run docker containers through the service as well as how to pipe stuff into your SSH service.  
 
 
 # Troubleshooting
