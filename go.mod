@@ -1,6 +1,6 @@
-module github.com/tailscale/ssh
+module github.com/tailscale/gliderssh
 
-go 1.20
+go 1.26
 
 require (
 	github.com/anmitsu/go-shlex v0.0.0-20200514113438-38f4b401e2be

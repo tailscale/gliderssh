@@ -5,7 +5,7 @@ import (
 	"io"
 	"os"
 
-	"github.com/gliderlabs/ssh"
+	"github.com/tailscale/gliderssh"
 )
 
 func ExampleListenAndServe() {
