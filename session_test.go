@@ -2,6 +2,7 @@ package ssh
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -311,7 +312,7 @@ func TestSignals(t *testing.T) {
 	errChan := make(chan error, 5)
 
 	// doneChan lets us specify that we should exit.
-	doneChan := make(chan interface{})
+	doneChan := make(chan any)
 
 	session, _, cleanup := newTestSession(t, &Server{
 		Handler: func(s Session) {
@@ -327,7 +328,7 @@ func TestSignals(t *testing.T) {
 					return
 				}
 			case <-doneChan:
-				errChan <- fmt.Errorf("Unexpected done")
+				errChan <- errors.New("unexpected done")
 				return
 			}
 
@@ -338,7 +339,7 @@ func TestSignals(t *testing.T) {
 					return
 				}
 			case <-doneChan:
-				errChan <- fmt.Errorf("Unexpected done")
+				errChan <- errors.New("unexpected done")
 				return
 			}
 		},
@@ -369,7 +370,7 @@ func TestBreakWithChanRegistered(t *testing.T) {
 	errChan := make(chan error, 5)
 
 	// doneChan lets us specify that we should exit.
-	doneChan := make(chan interface{})
+	doneChan := make(chan any)
 
 	breakChan := make(chan bool)
 
@@ -384,7 +385,7 @@ func TestBreakWithChanRegistered(t *testing.T) {
 			case <-breakChan:
 				io.WriteString(s, "break")
 			case <-doneChan:
-				errChan <- fmt.Errorf("Unexpected done")
+				errChan <- errors.New("unexpected done")
 				return
 			}
 		},
@@ -423,7 +424,7 @@ func TestBreakWithoutChanRegistered(t *testing.T) {
 	errChan := make(chan error, 5)
 
 	// doneChan lets us specify that we should exit.
-	doneChan := make(chan interface{})
+	doneChan := make(chan any)
 
 	waitUntilAfterBreakSent := make(chan bool)
 

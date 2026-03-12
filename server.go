@@ -3,7 +3,6 @@ package ssh
 import (
 	"context"
 	"errors"
-	"fmt"
 	"net"
 	"sync"
 	"time"
@@ -151,7 +150,7 @@ func (srv *Server) config(ctx Context) *gossh.ServerConfig {
 		config.PasswordCallback = func(conn gossh.ConnMetadata, password []byte) (*gossh.Permissions, error) {
 			applyConnMetadata(ctx, conn)
 			if ok := srv.PasswordHandler(ctx, string(password)); !ok {
-				return ctx.Permissions().Permissions, fmt.Errorf("permission denied")
+				return ctx.Permissions().Permissions, errors.New("permission denied")
 			}
 			return ctx.Permissions().Permissions, nil
 		}
@@ -170,7 +169,7 @@ func (srv *Server) config(ctx Context) *gossh.ServerConfig {
 		config.KeyboardInteractiveCallback = func(conn gossh.ConnMetadata, challenger gossh.KeyboardInteractiveChallenge) (*gossh.Permissions, error) {
 			applyConnMetadata(ctx, conn)
 			if ok := srv.KeyboardInteractiveHandler(ctx, challenger); !ok {
-				return ctx.Permissions().Permissions, fmt.Errorf("permission denied")
+				return ctx.Permissions().Permissions, errors.New("permission denied")
 			}
 			return ctx.Permissions().Permissions, nil
 		}
