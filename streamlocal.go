@@ -91,6 +91,14 @@ type remoteUnixForwardChannelData struct {
 	Reserved   string
 }
 
+// forwardKey identifies a forwarded Unix socket scoped to a specific
+// SSH session, preventing cross-session collisions and ensuring that
+// one session cannot cancel another session's forward.
+type forwardKey struct {
+	sessionID string
+	addr      string
+}
+
 // ForwardedUnixHandler can be enabled by creating a ForwardedUnixHandler and
 // adding the HandleSSHRequest callback to the server's RequestHandlers under
 // `streamlocal-forward@openssh.com` and
@@ -100,13 +108,13 @@ type remoteUnixForwardChannelData struct {
 // not work on all Windows installations and is not tested on Windows.
 type ForwardedUnixHandler struct {
 	sync.Mutex
-	forwards map[string]net.Listener
+	forwards map[forwardKey]net.Listener
 }
 
 func (h *ForwardedUnixHandler) HandleSSHRequest(ctx Context, srv *Server, req *gossh.Request) (bool, []byte) {
 	h.Lock()
 	if h.forwards == nil {
-		h.forwards = make(map[string]net.Listener)
+		h.forwards = make(map[forwardKey]net.Listener)
 	}
 	h.Unlock()
 	conn, ok := ctx.Value(ContextKeyConn).(*gossh.ServerConn)
@@ -129,10 +137,17 @@ func (h *ForwardedUnixHandler) HandleSSHRequest(ctx Context, srv *Server, req *g
 		}
 
 		addr := reqPayload.SocketPath
+		key := forwardKey{
+			sessionID: ctx.SessionID(),
+			addr:      addr,
+		}
+
+		// Use a nil sentinel to claim the key while the callback runs,
+		// preventing a concurrent request from racing past the check.
 		h.Lock()
-		_, ok := h.forwards[addr]
-		h.Unlock()
+		_, ok := h.forwards[key]
 		if ok {
+			h.Unlock()
 			// In cases where ExitOnForwardFailure=yes is set, returning
 			// false here will cause the connection to be closed. To avoid
 			// this, and to match OpenSSH behavior, we silently ignore
@@ -140,9 +155,14 @@ func (h *ForwardedUnixHandler) HandleSSHRequest(ctx Context, srv *Server, req *g
 			// TODO: log duplicate forward
 			return true, nil
 		}
+		h.forwards[key] = nil // placeholder; claimed
+		h.Unlock()
 
 		ln, err := srv.ReverseUnixForwardingCallback(ctx, addr)
 		if err != nil {
+			h.Lock()
+			delete(h.forwards, key)
+			h.Unlock()
 			if errors.Is(err, ErrRejected) {
 				return false, []byte(rejectedMessage(err))
 			}
@@ -150,15 +170,14 @@ func (h *ForwardedUnixHandler) HandleSSHRequest(ctx Context, srv *Server, req *g
 			return false, nil
 		}
 
-		// The listener needs to successfully start before it can be added to
-		// the map, so we don't have to worry about checking for an existing
-		// listener as you can't listen on the same socket twice.
-		//
-		// This is also what the TCP version of this code does.
 		h.Lock()
-		h.forwards[addr] = ln
+		h.forwards[key] = ln
 		h.Unlock()
 
+		// Use the connection-scoped context for bicopy so active data
+		// transfers survive listener shutdown. The derived context is
+		// only used for the accept loop lifecycle.
+		connCtx := ctx
 		ctx, cancel := context.WithCancel(ctx)
 		go func() {
 			<-ctx.Done()
@@ -184,14 +203,14 @@ func (h *ForwardedUnixHandler) HandleSSHRequest(ctx Context, srv *Server, req *g
 						return
 					}
 					go gossh.DiscardRequests(reqs)
-					bicopy(ctx, ch, c)
+					bicopy(connCtx, ch, c)
 				}()
 			}
 
 			h.Lock()
-			ln2, ok := h.forwards[addr]
+			ln2, ok := h.forwards[key]
 			if ok && ln2 == ln {
-				delete(h.forwards, addr)
+				delete(h.forwards, key)
 			}
 			h.Unlock()
 			_ = ln.Close()
@@ -206,8 +225,15 @@ func (h *ForwardedUnixHandler) HandleSSHRequest(ctx Context, srv *Server, req *g
 			// TODO: log parse failure
 			return false, nil
 		}
+		key := forwardKey{
+			sessionID: ctx.SessionID(),
+			addr:      reqPayload.SocketPath,
+		}
 		h.Lock()
-		ln, ok := h.forwards[reqPayload.SocketPath]
+		ln, ok := h.forwards[key]
+		if ok {
+			delete(h.forwards, key)
+		}
 		h.Unlock()
 		if ok {
 			_ = ln.Close()
