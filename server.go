@@ -3,6 +3,7 @@ package ssh
 import (
 	"context"
 	"errors"
+	"maps"
 	"net"
 	"sync"
 	"time"
@@ -100,21 +101,15 @@ func (srv *Server) ensureHandlers() {
 
 	if srv.RequestHandlers == nil {
 		srv.RequestHandlers = map[string]RequestHandler{}
-		for k, v := range DefaultRequestHandlers {
-			srv.RequestHandlers[k] = v
-		}
+		maps.Copy(srv.RequestHandlers, DefaultRequestHandlers)
 	}
 	if srv.ChannelHandlers == nil {
 		srv.ChannelHandlers = map[string]ChannelHandler{}
-		for k, v := range DefaultChannelHandlers {
-			srv.ChannelHandlers[k] = v
-		}
+		maps.Copy(srv.ChannelHandlers, DefaultChannelHandlers)
 	}
 	if srv.SubsystemHandlers == nil {
 		srv.SubsystemHandlers = map[string]SubsystemHandler{}
-		for k, v := range DefaultSubsystemHandlers {
-			srv.SubsystemHandlers[k] = v
-		}
+		maps.Copy(srv.SubsystemHandlers, DefaultSubsystemHandlers)
 	}
 }
 
