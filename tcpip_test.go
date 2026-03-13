@@ -106,14 +106,14 @@ func TestReverseTCPForwardingWorks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to listen on a random TCP port over SSH: %v", err)
 	}
-	defer l.Close()
+	defer l.Close() //nolint:errcheck
 	go func() {
 		conn, err := l.Accept()
 		if err != nil {
 			return
 		}
-		conn.Write(sampleServerResponse)
-		conn.Close()
+		_, _ = conn.Write(sampleServerResponse)
+		_ = conn.Close()
 	}()
 
 	// Dial the listener that should've been created by the server.
