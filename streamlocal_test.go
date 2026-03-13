@@ -178,8 +178,8 @@ func TestReverseUnixForwardingWorks(t *testing.T) {
 		t.Fatalf("failed to close remote listener: %v", err)
 	}
 	_, err = os.Stat(remoteSocketPath)
-	if err == nil && !os.IsNotExist(err) {
-		t.Fatalf("expected remote socket to be gone but it still exists: %v", err)
+	if err == nil {
+		t.Fatal("expected remote socket to be removed after close")
 	}
 }
 
