@@ -80,9 +80,15 @@ type remoteUnixForwardRequest struct {
 
 // remoteUnixForwardChannelData describes the data sent as the payload in the new
 // channel request when a Unix connection is accepted by the listener.
+//
+// See OpenSSH PROTOCOL, Section 2.4 "forwarded-streamlocal@openssh.com":
+// https://github.com/openssh/openssh-portable/blob/master/PROTOCOL
+//
+// See also the client-side struct in x/crypto/ssh (forwardedStreamLocalPayload):
+// https://cs.opensource.google/go/x/crypto/+/master:ssh/streamlocal.go
 type remoteUnixForwardChannelData struct {
 	SocketPath string
-	Reserved   uint32
+	Reserved   string
 }
 
 // ForwardedUnixHandler can be enabled by creating a ForwardedUnixHandler and
