@@ -30,7 +30,10 @@ const (
 // DefaultHandler is the default Handler used by Serve.
 var DefaultHandler Handler
 
-// ErrReject is returned by some callbacks to reject a request.
+// ErrRejected may be returned by LocalUnixForwardingCallback or
+// ReverseUnixForwardingCallback to reject a forwarding request. When
+// returned, the server replies with "prohibited" rather than
+// "connection failed."
 var ErrRejected = errors.New("ssh: rejected")
 
 // Option is a functional option handler for Server.
