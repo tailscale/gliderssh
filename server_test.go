@@ -128,7 +128,7 @@ func TestServerClose(t *testing.T) {
 }
 
 func TestServerHandshakeTimeout(t *testing.T) {
-	l := newLocalListener()
+	l := newLocalTCPListener()
 
 	s := &Server{
 		HandshakeTimeout: time.Millisecond,
