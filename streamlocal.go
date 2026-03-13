@@ -133,8 +133,12 @@ func (h *ForwardedUnixHandler) HandleSSHRequest(ctx Context, srv *Server, req *g
 		_, ok := h.forwards[addr]
 		h.Unlock()
 		if ok {
-			// TODO: log failure
-			return false, nil
+			// In cases where ExitOnForwardFailure=yes is set, returning
+			// false here will cause the connection to be closed. To avoid
+			// this, and to match OpenSSH behavior, we silently ignore
+			// the second forward request.
+			// TODO: log duplicate forward
+			return true, nil
 		}
 
 		ln, err := srv.ReverseUnixForwardingCallback(ctx, addr)
