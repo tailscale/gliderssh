@@ -71,19 +71,27 @@ type LocalPortForwardingCallback func(ctx Context, destinationHost string, desti
 type ReversePortForwardingCallback func(ctx Context, bindHost string, bindPort uint32) bool
 
 // LocalUnixForwardingCallback is a hook for allowing unix forwarding
-// (direct-streamlocal@openssh.com). Returning ErrRejected will reject the
-// request. The returned net.Conn will be closed by the server when no longer
-// needed.
+// (direct-streamlocal@openssh.com). The callback receives the client-requested
+// socket path and returns a connection to the target socket, or an error.
 //
-// Use SimpleUnixLocalForwardingCallback for a basic implementation.
+// Returning ErrRejected (or an error wrapping it) rejects the request with
+// "administratively prohibited" and the error message is sent to the client.
+// Any other error rejects with "connection failed."
+//
+// Use NewLocalUnixForwardingCallback to create a callback with built-in path
+// validation and security controls.
 type LocalUnixForwardingCallback func(ctx Context, socketPath string) (net.Conn, error)
 
 // ReverseUnixForwardingCallback is a hook for allowing reverse unix forwarding
-// (streamlocal-forward@openssh.com). Returning ErrRejected will reject the
-// request. The returned net.Listener will be closed by the server when no
-// longer needed.
+// (streamlocal-forward@openssh.com). The callback receives the client-requested
+// socket path and returns a listener bound to that path, or an error.
 //
-// Use SimpleUnixReverseForwardingCallback for a basic implementation.
+// Returning ErrRejected (or an error wrapping it) rejects the request with
+// "administratively prohibited" and the error message is sent to the client.
+// Any other error rejects the request silently.
+//
+// Use NewReverseUnixForwardingCallback to create a callback with built-in path
+// validation, permission controls, and security defaults matching OpenSSH.
 type ReverseUnixForwardingCallback func(ctx Context, socketPath string) (net.Listener, error)
 
 // ServerConfigCallback is a hook for creating custom default server configs

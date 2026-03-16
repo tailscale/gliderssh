@@ -8,11 +8,17 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 
 	gossh "golang.org/x/crypto/ssh"
 )
+
+// maxSunPathLen is the maximum length of a Unix domain socket path on the
+// current platform, derived from the kernel's sockaddr_un.sun_path field.
+// This is 108 on Linux and 104 on macOS/BSD.
+var maxSunPathLen = len(syscall.RawSockaddrUnix{}.Path)
 
 const (
 	forwardedUnixChannelType = "forwarded-streamlocal@openssh.com"
@@ -49,10 +55,10 @@ func DirectStreamLocalHandler(srv *Server, _ *gossh.ServerConn, newChan gossh.Ne
 	dconn, err := srv.LocalUnixForwardingCallback(ctx, d.SocketPath)
 	if err != nil {
 		if errors.Is(err, ErrRejected) {
-			_ = newChan.Reject(gossh.Prohibited, "unix forwarding is disabled")
+			_ = newChan.Reject(gossh.Prohibited, rejectedMessage(err))
 			return
 		}
-		_ = newChan.Reject(gossh.ConnectionFailed, fmt.Sprintf("dial unix socket %q: %+v", d.SocketPath, err.Error()))
+		_ = newChan.Reject(gossh.ConnectionFailed, fmt.Sprintf("dial unix socket %q: %v", d.SocketPath, err))
 		return
 	}
 
@@ -128,7 +134,7 @@ func (h *ForwardedUnixHandler) HandleSSHRequest(ctx Context, srv *Server, req *g
 		ln, err := srv.ReverseUnixForwardingCallback(ctx, addr)
 		if err != nil {
 			if errors.Is(err, ErrRejected) {
-				return false, []byte("unix forwarding is disabled")
+				return false, []byte(rejectedMessage(err))
 			}
 			// TODO: log unix listen failure
 			return false, nil
@@ -215,38 +221,214 @@ func unlink(path string) error {
 	}
 }
 
-// SimpleUnixLocalForwardingCallback provides a basic implementation for
-// LocalUnixForwardingCallback. It will simply dial the requested socket using
-// a context-aware dialer.
-func SimpleUnixLocalForwardingCallback(ctx Context, socketPath string) (net.Conn, error) {
-	var d net.Dialer
-	return d.DialContext(ctx, "unix", socketPath)
+// rejectedMessage returns a user-facing rejection message. If err is a bare
+// ErrRejected (no wrapping context), it returns the generic "unix forwarding
+// is disabled" for backward compatibility. Wrapped errors (e.g. rejectionError)
+// return their descriptive message.
+func rejectedMessage(err error) string {
+	if err == ErrRejected { //nolint:errorlint // intentional identity check
+		return "unix forwarding is disabled"
+	}
+	return err.Error()
 }
 
-// SimpleUnixReverseForwardingCallback provides a basic implementation for
-// ReverseUnixForwardingCallback. The parent directory will be created (with
-// os.MkdirAll), and existing files with the same name will be removed.
-func SimpleUnixReverseForwardingCallback(_ Context, socketPath string) (net.Listener, error) {
-	// Create socket parent dir if not exists.
-	parentDir := filepath.Dir(socketPath)
-	err := os.MkdirAll(parentDir, 0700)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create parent directory %q for socket %q: %w", parentDir, socketPath, err)
+// rejectionError wraps ErrRejected with a descriptive reason for the SSH
+// client. It satisfies errors.Is(err, ErrRejected) so that handlers send
+// the rejection as "administratively prohibited" with the descriptive message.
+type rejectionError struct {
+	reason string
+}
+
+func (e *rejectionError) Error() string { return e.reason }
+func (e *rejectionError) Unwrap() error { return ErrRejected }
+
+// UnixForwardingOptions configures the behavior of
+// NewLocalUnixForwardingCallback and NewReverseUnixForwardingCallback.
+type UnixForwardingOptions struct {
+	// AllowAll, if true, permits any absolute socket path without directory
+	// restrictions. AllowedDirectories and DeniedPrefixes are ignored when
+	// set. Basic sanitization (absolute path, length, filepath.Clean) is
+	// still applied.
+	AllowAll bool
+
+	// AllowedDirectories is the list of directory prefixes under which
+	// socket paths are permitted. Paths are cleaned with filepath.Clean
+	// before prefix matching. Ignored when AllowAll is true.
+	// When AllowAll is false and AllowedDirectories is empty, all
+	// requests are denied.
+	AllowedDirectories []string
+
+	// DeniedPrefixes is an optional denylist applied after the allowlist.
+	// Useful for excluding sensitive sub-paths within allowed directories
+	// (e.g. /run/user/1000/systemd/ within /run/user/1000/).
+	// Ignored when AllowAll is true.
+	DeniedPrefixes []string
+
+	// BindUnlink controls whether an existing socket file is removed
+	// before binding (reverse forwarding only). Only socket-type files
+	// are removed; regular files are left in place and the listen will
+	// fail with EADDRINUSE. Default: false.
+	// Matches OpenSSH's StreamLocalBindUnlink (default: no).
+	BindUnlink bool
+
+	// BindMask is the umask applied when creating listening sockets
+	// (reverse forwarding only). The resulting socket permission is
+	// 0666 &^ BindMask. If nil, defaults to 0177 (socket permission
+	// 0600, owner read/write only).
+	// Matches OpenSSH's StreamLocalBindMask.
+	BindMask *os.FileMode
+
+	// PathValidator is an optional additional validation function called
+	// after built-in checks pass. Return an error wrapping ErrRejected
+	// (or a *rejectionError) for "administratively prohibited" semantics,
+	// or any other error for "connection failed."
+	PathValidator func(ctx Context, socketPath string) error
+}
+
+// validateSocketPath checks that socketPath is safe according to opts.
+// It returns the cleaned path on success. Returned errors wrap ErrRejected
+// so that handlers report them as "administratively prohibited" with a
+// descriptive message.
+func validateSocketPath(socketPath string, opts UnixForwardingOptions) (string, error) {
+	if !filepath.IsAbs(socketPath) {
+		return "", &rejectionError{reason: "socket path must be absolute"}
 	}
 
-	// Remove existing socket if it exists. We do not use os.Remove() here
-	// so that directories are kept. Note that it's possible that we will
-	// overwrite a regular file here. Both of these behaviors match OpenSSH,
-	// however, which is why we unlink.
-	err = unlink(socketPath)
-	if err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return nil, fmt.Errorf("failed to remove existing file in socket path %q: %w", socketPath, err)
+	cleaned := filepath.Clean(socketPath)
+
+	if strings.ContainsRune(cleaned, 0) {
+		return "", &rejectionError{reason: "socket path contains NUL byte"}
 	}
 
-	ln, err := net.Listen("unix", socketPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to listen on unix socket %q: %w", socketPath, err)
+	if len(cleaned) >= maxSunPathLen {
+		return "", &rejectionError{
+			reason: fmt.Sprintf("socket path too long (%d >= %d)", len(cleaned), maxSunPathLen),
+		}
 	}
 
-	return ln, err
+	if !opts.AllowAll {
+		if len(opts.AllowedDirectories) == 0 {
+			return "", &rejectionError{
+				reason: fmt.Sprintf("socket path %q is not in an allowed directory", cleaned),
+			}
+		}
+
+		allowed := false
+		for _, dir := range opts.AllowedDirectories {
+			prefix := filepath.Clean(dir)
+			if !strings.HasSuffix(prefix, string(filepath.Separator)) {
+				prefix += string(filepath.Separator)
+			}
+			if strings.HasPrefix(cleaned, prefix) {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			return "", &rejectionError{
+				reason: fmt.Sprintf("socket path %q is not in an allowed directory", cleaned),
+			}
+		}
+
+		for _, denied := range opts.DeniedPrefixes {
+			prefix := filepath.Clean(denied)
+			if cleaned == prefix || strings.HasPrefix(cleaned, prefix+string(filepath.Separator)) {
+				return "", &rejectionError{
+					reason: fmt.Sprintf("socket path %q is denied", cleaned),
+				}
+			}
+		}
+	}
+
+	return cleaned, nil
+}
+
+// NewLocalUnixForwardingCallback returns a LocalUnixForwardingCallback that
+// validates socket paths against the provided options before dialing.
+// Path validation errors are reported to the SSH client as
+// "administratively prohibited" rejections with descriptive messages.
+func NewLocalUnixForwardingCallback(opts UnixForwardingOptions) LocalUnixForwardingCallback {
+	return func(ctx Context, socketPath string) (net.Conn, error) {
+		cleaned, err := validateSocketPath(socketPath, opts)
+		if err != nil {
+			return nil, err
+		}
+		if opts.PathValidator != nil {
+			if err := opts.PathValidator(ctx, cleaned); err != nil {
+				return nil, err
+			}
+		}
+
+		var d net.Dialer
+		return d.DialContext(ctx, "unix", cleaned)
+	}
+}
+
+// NewReverseUnixForwardingCallback returns a ReverseUnixForwardingCallback
+// that validates socket paths against the provided options before listening.
+//
+// Unlike a bare net.Listen, this callback:
+//   - Validates the socket path against allow/deny lists
+//   - Does not create parent directories
+//   - Applies a restrictive permission mask (default 0177 / mode 0600)
+//   - Only unlinks existing socket files when BindUnlink is true (not
+//     regular files or directories)
+func NewReverseUnixForwardingCallback(opts UnixForwardingOptions) ReverseUnixForwardingCallback {
+	return func(ctx Context, socketPath string) (net.Listener, error) {
+		cleaned, err := validateSocketPath(socketPath, opts)
+		if err != nil {
+			return nil, err
+		}
+		if opts.PathValidator != nil {
+			if err := opts.PathValidator(ctx, cleaned); err != nil {
+				return nil, err
+			}
+		}
+
+		if opts.BindUnlink {
+			// Only unlink if the existing file is a socket or does
+			// not exist. Regular files and directories are left in
+			// place so that net.Listen fails with EADDRINUSE rather
+			// than silently deleting user data.
+			if info, serr := os.Lstat(cleaned); serr == nil {
+				if info.Mode().Type() == os.ModeSocket {
+					if uerr := unlink(cleaned); uerr != nil && !errors.Is(uerr, fs.ErrNotExist) {
+						return nil, fmt.Errorf("failed to unlink existing socket %q: %w", cleaned, uerr)
+					}
+				}
+			}
+		}
+
+		lc := &net.ListenConfig{}
+		ln, err := lc.Listen(ctx, "unix", cleaned)
+		if err != nil {
+			return nil, fmt.Errorf("failed to listen on unix socket %q: %w", cleaned, err)
+		}
+
+		// Apply socket permission mask. Default 0177 (mode 0600),
+		// matching OpenSSH's StreamLocalBindMask.
+		mask := os.FileMode(0177)
+		if opts.BindMask != nil {
+			mask = *opts.BindMask
+		}
+		mode := os.FileMode(0666) &^ mask
+		if err := os.Chmod(cleaned, mode); err != nil {
+			_ = ln.Close()
+			return nil, fmt.Errorf("failed to set permissions on socket %q: %w", cleaned, err)
+		}
+
+		return ln, nil
+	}
+}
+
+// UserSocketDirectories returns common socket directory prefixes for a user,
+// suitable for use as UnixForwardingOptions.AllowedDirectories. The returned
+// list includes the user's home directory, /tmp, and the XDG runtime
+// directory (/run/user/<uid>).
+func UserSocketDirectories(homeDir string, uid string) []string {
+	return []string{
+		homeDir,
+		"/tmp",
+		filepath.Join("/run/user", uid),
+	}
 }
