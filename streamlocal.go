@@ -10,15 +10,9 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 
 	gossh "golang.org/x/crypto/ssh"
 )
-
-// maxSunPathLen is the maximum length of a Unix domain socket path on the
-// current platform, derived from the kernel's sockaddr_un.sun_path field.
-// This is 108 on Linux and 104 on macOS/BSD.
-var maxSunPathLen = len(syscall.RawSockaddrUnix{}.Path)
 
 const (
 	forwardedUnixChannelType = "forwarded-streamlocal@openssh.com"
@@ -245,18 +239,6 @@ func (h *ForwardedUnixHandler) HandleSSHRequest(ctx Context, srv *Server, req *g
 	}
 }
 
-// unlink removes files and unlike os.Remove, directories are kept.
-func unlink(path string) error {
-	// Ignore EINTR like os.Remove, see ignoringEINTR in os/file_posix.go
-	// for more details.
-	for {
-		err := syscall.Unlink(path)
-		if !errors.Is(err, syscall.EINTR) {
-			return err
-		}
-	}
-}
-
 // rejectedMessage returns a user-facing rejection message. If err is a bare
 // ErrRejected (no wrapping context), it returns the generic "unix forwarding
 // is disabled" for backward compatibility. Wrapped errors (e.g. rejectionError)
@@ -384,6 +366,11 @@ func validateSocketPath(socketPath string, opts UnixForwardingOptions) (string, 
 // Path validation errors are reported to the SSH client as
 // "administratively prohibited" rejections with descriptive messages.
 func NewLocalUnixForwardingCallback(opts UnixForwardingOptions) LocalUnixForwardingCallback {
+	if !unixSocketsAvailable {
+		return func(_ Context, _ string) (net.Conn, error) {
+			return nil, &rejectionError{reason: "unix domain socket forwarding is not supported on this platform"}
+		}
+	}
 	return func(ctx Context, socketPath string) (net.Conn, error) {
 		cleaned, err := validateSocketPath(socketPath, opts)
 		if err != nil {
@@ -410,6 +397,11 @@ func NewLocalUnixForwardingCallback(opts UnixForwardingOptions) LocalUnixForward
 //   - Only unlinks existing socket files when BindUnlink is true (not
 //     regular files or directories)
 func NewReverseUnixForwardingCallback(opts UnixForwardingOptions) ReverseUnixForwardingCallback {
+	if !unixSocketsAvailable {
+		return func(_ Context, _ string) (net.Listener, error) {
+			return nil, &rejectionError{reason: "unix domain socket forwarding is not supported on this platform"}
+		}
+	}
 	return func(ctx Context, socketPath string) (net.Listener, error) {
 		cleaned, err := validateSocketPath(socketPath, opts)
 		if err != nil {
