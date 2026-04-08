@@ -181,42 +181,66 @@ func (h *ForwardedTCPHandler) HandleSSHRequest(ctx Context, srv *Server, req *go
 	}
 }
 
-// bicopy copies all of the data between the two connections and will close them
-// after one or both of them are done writing. If the context is canceled, both
-// of the connections will be closed.
+// bicopy copies data bidirectionally between c1 and c2 until both directions
+// complete or the context is canceled. When one direction finishes, it
+// half-closes the write side of the destination to signal EOF to the peer,
+// allowing the other direction to finish gracefully. If the context is
+// canceled, both connections are force-closed.
 func bicopy(ctx context.Context, c1, c2 io.ReadWriteCloser) {
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
-	defer func() {
-		_ = c1.Close()
-		_ = c2.Close()
-	}()
+	defer c1.Close()
+	defer c2.Close()
 
 	var wg sync.WaitGroup
-	copyFunc := func(dst io.WriteCloser, src io.Reader) {
-		defer func() {
-			wg.Done()
-			// If one side of the copy fails, ensure the other one exits as
-			// well.
-			cancel()
-		}()
-		_, _ = io.Copy(dst, src)
-	}
-
 	wg.Add(2)
-	go copyFunc(c1, c2)
-	go copyFunc(c2, c1)
+	go func() {
+		defer wg.Done()
+		defer halfCloseWrite(c1) // done writing to destination
+		defer halfCloseRead(c2)  // done reading from source
+		_, _ = io.Copy(c1, c2)
+	}()
+	go func() {
+		defer wg.Done()
+		defer halfCloseWrite(c2) // done writing to destination
+		defer halfCloseRead(c1)  // done reading from source
+		_, _ = io.Copy(c2, c1)
+	}()
 
-	// Convert waitgroup to a channel so we can also wait on the context.
 	done := make(chan struct{})
 	go func() {
-		defer close(done)
 		wg.Wait()
+		close(done)
 	}()
 
 	select {
-	case <-ctx.Done():
 	case <-done:
+		return
+	case <-ctx.Done():
+		c1.Close()
+		c2.Close()
+		<-done
+	}
+}
+
+// halfCloseWrite signals EOF on the write side of c without fully closing
+// the connection. For types that don't support half-close, this is a no-op
+// and the deferred full Close in bicopy handles cleanup.
+func halfCloseWrite(c io.ReadWriteCloser) {
+	type closeWriter interface {
+		CloseWrite() error
+	}
+	if cw, ok := c.(closeWriter); ok {
+		_ = cw.CloseWrite()
+	}
+}
+
+// halfCloseRead closes the read side of c without fully closing the
+// connection. For types that don't support half-close, this is a no-op
+// and the deferred full Close in bicopy handles cleanup.
+func halfCloseRead(c io.ReadWriteCloser) {
+	type closeReader interface {
+		CloseRead() error
+	}
+	if cr, ok := c.(closeReader); ok {
+		_ = cr.CloseRead()
 	}
 }
