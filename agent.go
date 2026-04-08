@@ -1,11 +1,10 @@
 package ssh
 
 import (
-	"io"
+	"context"
 	"net"
 	"os"
 	"path"
-	"sync"
 
 	gossh "golang.org/x/crypto/ssh"
 )
@@ -58,26 +57,13 @@ func ForwardAgentConnections(l net.Listener, s Session) {
 			return
 		}
 		go func(conn net.Conn) {
-			defer conn.Close()
 			channel, reqs, err := sshConn.OpenChannel(agentChannelType, nil)
 			if err != nil {
+				conn.Close()
 				return
 			}
-			defer channel.Close()
 			go gossh.DiscardRequests(reqs)
-			var wg sync.WaitGroup
-			wg.Add(2)
-			go func() {
-				io.Copy(conn, channel)
-				conn.(*net.UnixConn).CloseWrite()
-				wg.Done()
-			}()
-			go func() {
-				io.Copy(channel, conn)
-				channel.CloseWrite()
-				wg.Done()
-			}()
-			wg.Wait()
+			bicopy(context.Background(), channel, conn)
 		}(conn)
 	}
 }
