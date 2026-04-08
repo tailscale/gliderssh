@@ -652,6 +652,9 @@ func TestNewReverseUnixForwardingCallbackValidation(t *testing.T) {
 func TestNewReverseUnixForwardingCallbackBindUnlink(t *testing.T) {
 	t.Parallel()
 
+	ctx, cancel := newContext(nil)
+	defer cancel()
+
 	dir := tempDirUnixSocket(t)
 	sockPath := filepath.Join(dir, "test.sock")
 
@@ -667,7 +670,7 @@ func TestNewReverseUnixForwardingCallbackBindUnlink(t *testing.T) {
 	cbNoUnlink := NewReverseUnixForwardingCallback(UnixForwardingOptions{
 		AllowAll: true,
 	})
-	_, err = cbNoUnlink(nil, sockPath)
+	_, err = cbNoUnlink(ctx, sockPath)
 	if err == nil {
 		t.Fatal("expected listen to fail on existing socket without BindUnlink")
 	}
@@ -677,7 +680,7 @@ func TestNewReverseUnixForwardingCallbackBindUnlink(t *testing.T) {
 		AllowAll:   true,
 		BindUnlink: true,
 	})
-	newLn, err := cbUnlink(nil, sockPath)
+	newLn, err := cbUnlink(ctx, sockPath)
 	if err != nil {
 		t.Fatalf("expected listen to succeed with BindUnlink, got: %v", err)
 	}
@@ -686,6 +689,9 @@ func TestNewReverseUnixForwardingCallbackBindUnlink(t *testing.T) {
 
 func TestNewReverseUnixForwardingCallbackBindUnlinkSkipsNonSocket(t *testing.T) {
 	t.Parallel()
+
+	ctx, cancel := newContext(nil)
+	defer cancel()
 
 	dir := tempDirUnixSocket(t)
 	filePath := filepath.Join(dir, "regular.file")
@@ -700,7 +706,7 @@ func TestNewReverseUnixForwardingCallbackBindUnlinkSkipsNonSocket(t *testing.T) 
 		AllowAll:   true,
 		BindUnlink: true,
 	})
-	_, err := cb(nil, filePath)
+	_, err := cb(ctx, filePath)
 	if err == nil {
 		t.Fatal("expected listen to fail on regular file even with BindUnlink")
 	}
@@ -728,6 +734,9 @@ func TestNewReverseUnixForwardingCallbackSocketPermissions(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
+			ctx, cancel := newContext(nil)
+			defer cancel()
+
 			// Use a short /tmp path to stay under sun_path limits
 			// even when the test framework creates long temp paths.
 			dir, err := os.MkdirTemp("/tmp", "ssh-perm-")
@@ -741,7 +750,7 @@ func TestNewReverseUnixForwardingCallbackSocketPermissions(t *testing.T) {
 				AllowAll: true,
 				BindMask: tt.mask,
 			})
-			ln, err := cb(nil, sockPath)
+			ln, err := cb(ctx, sockPath)
 			if err != nil {
 				t.Fatalf("failed to listen: %v", err)
 			}
