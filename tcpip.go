@@ -183,9 +183,10 @@ func (h *ForwardedTCPHandler) HandleSSHRequest(ctx Context, srv *Server, req *go
 
 // bicopy copies data bidirectionally between c1 and c2 until both directions
 // complete or the context is canceled. When one direction finishes, it
-// half-closes the write side of the destination to signal EOF to the peer,
-// allowing the other direction to finish gracefully. If the context is
-// canceled, both connections are force-closed.
+// half-closes the write side of the destination to signal EOF to the peer
+// per RFC 4254 Section 5.3, allowing the other direction to finish gracefully.
+// If the context is canceled, both connections are force-closed.
+// https://datatracker.ietf.org/doc/html/rfc4254#section-5.3
 func bicopy(ctx context.Context, c1, c2 io.ReadWriteCloser) {
 	defer c1.Close()
 	defer c2.Close()
@@ -222,7 +223,10 @@ func bicopy(ctx context.Context, c1, c2 io.ReadWriteCloser) {
 }
 
 // halfCloseWrite signals EOF on the write side of c without fully closing
-// the connection. For types that don't support half-close, this is a no-op
+// the connection. This allows the peer to finish reading any buffered data
+// and then close its side, which unblocks the other copy direction.
+// All connection types used in SSH forwarding ([gossh.Channel], [net.TCPConn],
+// [net.UnixConn]) support CloseWrite. For types that don't, this is a no-op
 // and the deferred full Close in bicopy handles cleanup.
 func halfCloseWrite(c io.ReadWriteCloser) {
 	type closeWriter interface {
@@ -234,8 +238,10 @@ func halfCloseWrite(c io.ReadWriteCloser) {
 }
 
 // halfCloseRead closes the read side of c without fully closing the
-// connection. For types that don't support half-close, this is a no-op
-// and the deferred full Close in bicopy handles cleanup.
+// connection. This releases kernel resources on the source once all data
+// has been consumed. [net.TCPConn] and [net.UnixConn] support CloseRead;
+// [gossh.Channel] does not, so this is a no-op for SSH channels and the
+// deferred full Close in bicopy handles cleanup.
 func halfCloseRead(c io.ReadWriteCloser) {
 	type closeReader interface {
 		CloseRead() error
