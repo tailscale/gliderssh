@@ -188,11 +188,11 @@ func (sess *session) Exit(code int) error {
 	if err != nil {
 		return err
 	}
-	// Don't close the channel here. Per RFC 4254 section 6.10, the exit-status
-	// message should be sent before the channel is closed. By not closing
-	// immediately, we allow the session handler to complete any remaining I/O
-	// operations (like flushing output and sending EOF via CloseWrite) before
-	// the channel is closed by the request handler's cleanup code.
+	// Per RFC 4254 Section 6.10, the channel needs to be closed with
+	// SSH_MSG_CHANNEL_CLOSE after the exit-status message. By not closing
+	// here, we allow the caller to complete remaining I/O (e.g. flushing
+	// output and sending EOF via CloseWrite) before closing the channel.
+	// https://datatracker.ietf.org/doc/html/rfc4254#section-6.10
 	return nil
 }
 
