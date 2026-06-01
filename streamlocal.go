@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"slices"
 
 	gossh "golang.org/x/crypto/ssh"
 )
@@ -361,6 +362,57 @@ func validateSocketPath(socketPath string, opts UnixForwardingOptions) (string, 
 	return cleaned, nil
 }
 
+// validateAndResolveSocketPath validates socketPath lexically, then resolves
+// its symlinks and re-checks that the real destination is still within
+// opts.AllowedDirectories and not excluded by opts.DeniedPrefixes. It returns
+// the resolved path to dial.
+//
+// The lexical check alone is insufficient because the kernel connects to the
+// symlink target: a symlink inside an allowed directory could otherwise
+// redirect the connection to a socket outside it (e.g. a link in the user's
+// home dir pointing at /var/run/docker.sock). The allow/deny entries are
+// resolved as well, so legitimately symlinked directories (e.g. Linux's
+// /var/run -> /run, or macOS's /tmp -> /private/tmp) continue to match.
+func validateAndResolveSocketPath(socketPath string, opts UnixForwardingOptions) (string, error) {
+	cleaned, err := validateSocketPath(socketPath, opts)
+	if err != nil {
+		return "", err
+	}
+	if opts.AllowAll {
+		return cleaned, nil
+	}
+
+	resolved, err := filepath.EvalSymlinks(cleaned)
+	if err != nil {
+		return "", err
+	}
+	if resolved == cleaned {
+		// No symlinks were involved; the lexical check already
+		// authorized this exact path.
+		return cleaned, nil
+	}
+
+	opts.AllowedDirectories = resolvePrefixes(opts.AllowedDirectories)
+	opts.DeniedPrefixes = resolvePrefixes(opts.DeniedPrefixes)
+	if _, err := validateSocketPath(resolved, opts); err != nil {
+		return "", err
+	}
+	return resolved, nil
+}
+
+// resolvePrefixes returns prefixes with each entry's symlinks resolved.
+// Entries that cannot be resolved (e.g. they do not exist) are passed
+// through unchanged so they still participate in lexical matching.
+func resolvePrefixes(prefixes []string) []string {
+	out := slices.Clone(prefixes)
+	for i, p := range prefixes {
+		if r, err := filepath.EvalSymlinks(p); err == nil {
+			out[i] = r
+		}
+	}
+	return out
+}
+
 // NewLocalUnixForwardingCallback returns a LocalUnixForwardingCallback that
 // validates socket paths against the provided options before dialing.
 // Path validation errors are reported to the SSH client as
@@ -372,18 +424,18 @@ func NewLocalUnixForwardingCallback(opts UnixForwardingOptions) LocalUnixForward
 		}
 	}
 	return func(ctx Context, socketPath string) (net.Conn, error) {
-		cleaned, err := validateSocketPath(socketPath, opts)
+		resolved, err := validateAndResolveSocketPath(socketPath, opts)
 		if err != nil {
 			return nil, err
 		}
 		if opts.PathValidator != nil {
-			if err := opts.PathValidator(ctx, cleaned); err != nil {
+			if err := opts.PathValidator(ctx, resolved); err != nil {
 				return nil, err
 			}
 		}
 
 		var d net.Dialer
-		return d.DialContext(ctx, "unix", cleaned)
+		return d.DialContext(ctx, "unix", resolved)
 	}
 }
 
@@ -435,11 +487,11 @@ func NewReverseUnixForwardingCallback(opts UnixForwardingOptions) ReverseUnixFor
 
 		// Apply socket permission mask. Default 0177 (mode 0600),
 		// matching OpenSSH's StreamLocalBindMask.
-		mask := os.FileMode(0177)
+		mask := os.FileMode(0o177)
 		if opts.BindMask != nil {
 			mask = *opts.BindMask
 		}
-		mode := os.FileMode(0666) &^ mask
+		mode := os.FileMode(0o666) &^ mask
 		if err := os.Chmod(cleaned, mode); err != nil {
 			_ = ln.Close()
 			return nil, fmt.Errorf("failed to set permissions on socket %q: %w", cleaned, err)
