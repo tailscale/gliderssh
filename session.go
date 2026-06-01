@@ -7,7 +7,8 @@ import (
 	"net"
 	"sync"
 
-	"github.com/anmitsu/go-shlex"
+	"github.com/tailscale/gliderssh/shlex"
+
 	gossh "golang.org/x/crypto/ssh"
 )
 
@@ -217,7 +218,7 @@ func (sess *session) RawCommand() string {
 }
 
 func (sess *session) Command() []string {
-	cmd, _ := shlex.Split(sess.rawCmd, true)
+	cmd, _ := shlex.SplitPosix(sess.rawCmd)
 	return append([]string(nil), cmd...)
 }
 
