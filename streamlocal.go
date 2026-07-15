@@ -8,9 +8,9 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
-	"slices"
 
 	gossh "golang.org/x/crypto/ssh"
 )
@@ -400,6 +400,43 @@ func validateAndResolveSocketPath(socketPath string, opts UnixForwardingOptions)
 	return resolved, nil
 }
 
+// validateAndResolveListenPath validates socketPath, then resolves symlinks in its
+// parent directory and re-checks that the real bind location is still within
+// opts.AllowedDirectories and not excluded by opts.DeniedPrefixes. It returns the
+// resolved path to bind.
+//
+// Unlike validateAndResolveSocketPath, the socket file itself does not yet have to exist.
+func validateAndResolveListenPath(socketPath string, opts UnixForwardingOptions) (string, error) {
+	cleaned, err := validateSocketPath(socketPath, opts)
+	if err != nil {
+		return "", err
+	} else if opts.AllowAll {
+		return cleaned, nil
+	}
+
+	dir := filepath.Dir(cleaned)
+	resolvedDir, err := filepath.EvalSymlinks(dir) // evaluate on directory since socket may not exist yet
+	if err != nil {
+		return "", err
+	} else if resolvedDir == dir {
+		// No symlinks in the parent, the lexical check already validated this exact path
+		return cleaned, nil
+	}
+
+	resolved := filepath.Join(resolvedDir, filepath.Base(cleaned))
+	opts.AllowedDirectories = resolvePrefixes(opts.AllowedDirectories)
+	opts.DeniedPrefixes = resolvePrefixes(opts.DeniedPrefixes)
+	if _, err := validateSocketPath(resolved, opts); err != nil {
+		return "", err
+	}
+	// Technically a symlink wont be able to bind(), but for clarity and defense in depth check it
+	if info, err := os.Lstat(resolved); err == nil && info.Mode().Type() == os.ModeSymlink {
+		return "", &rejectionError{reason: fmt.Sprintf("socket path %q is a symlink", resolved)}
+	}
+
+	return resolved, nil
+}
+
 // resolvePrefixes returns prefixes with each entry's symlinks resolved.
 // Entries that cannot be resolved (e.g. they do not exist) are passed
 // through unchanged so they still participate in lexical matching.
@@ -455,7 +492,7 @@ func NewReverseUnixForwardingCallback(opts UnixForwardingOptions) ReverseUnixFor
 		}
 	}
 	return func(ctx Context, socketPath string) (net.Listener, error) {
-		cleaned, err := validateSocketPath(socketPath, opts)
+		cleaned, err := validateAndResolveListenPath(socketPath, opts)
 		if err != nil {
 			return nil, err
 		}

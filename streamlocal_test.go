@@ -519,6 +519,37 @@ func TestLocalUnixForwardingAllowsSymlinkWithinAllowedDir(t *testing.T) {
 	}
 }
 
+func TestReverseUnixForwardingRejectsSymlinkEscape(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := newContext(nil)
+	t.Cleanup(cancel)
+
+	// A directory outside the allowed area that a restricted user must not be able to bind sockets into
+	outsideDir := tempDirUnixSocket(t)
+
+	// The only directory the user is allowed to bind into, plus a symlink inside it pointing at the outside directory
+	allowedDir := tempDirUnixSocket(t)
+	linkDir := filepath.Join(allowedDir, "escape")
+	if err := os.Symlink(outsideDir, linkDir); err != nil {
+		t.Fatalf("failed to create symlink: %v", err)
+	}
+
+	cb := NewReverseUnixForwardingCallback(UnixForwardingOptions{
+		AllowedDirectories: []string{allowedDir},
+	})
+
+	// Directly binding in the outside directory is rejected lexically
+	if _, err := cb(ctx, filepath.Join(outsideDir, "test.sock")); !errors.Is(err, ErrRejected) {
+		t.Fatalf("direct bind outside allowed dir: got %v; want ErrRejected", err)
+	}
+
+	// Binding via the symlinked parent is also rejected
+	if _, err := cb(ctx, filepath.Join(linkDir, "test.sock")); !errors.Is(err, ErrRejected) {
+		t.Fatalf("bind via symlink escaping allowed dir: got %v; want ErrRejected", err)
+	}
+}
+
 func TestRejectedMessage(t *testing.T) {
 	t.Parallel()
 
