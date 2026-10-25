@@ -5,6 +5,7 @@ import (
 	"context"
 	"io"
 	"net"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -157,5 +158,74 @@ func TestServerHandshakeTimeout(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("client connection was not force-closed")
 		return
+	}
+}
+
+// TestServerConnHandshakeDeadlineRace checks that clearing the
+// handshake deadline is safe while other goroutines call
+// updateDeadline, which is what Read and Write do on every packet when
+// IdleTimeout is set. It requires -race to detect the race, and fails
+// if handshakeDeadline is a non-atomic *time.Time field.
+func TestServerConnHandshakeDeadlineRace(t *testing.T) {
+	c1, c2 := net.Pipe()
+	defer c1.Close()
+	defer c2.Close()
+	deadline := time.Now().Add(time.Minute)
+	conn := &serverConn{
+		Conn:        c1,
+		idleTimeout: time.Minute,
+	}
+	conn.handshakeDeadline.Store(&deadline)
+
+	stop := make(chan struct{})
+	var reads atomic.Int64
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				// Read and Write call updateDeadline on every
+				// packet once idleTimeout is set.
+				conn.updateDeadline()
+				reads.Add(1)
+			}
+		}
+	}()
+
+	// Store nil, as HandleConn does after the handshake, until
+	// concurrent updateDeadline calls are under way.
+	for reads.Load() < 100 {
+		conn.handshakeDeadline.Store(nil)
+	}
+	close(stop)
+	<-done
+}
+
+// TestServerHandshakeTimeoutClearedAfterHandshake checks that the
+// handshake deadline does not apply after the handshake completes:
+// with HandshakeTimeout set, a session whose handler runs longer than
+// the grace period still completes. The host key is generated before
+// the server is started so the handshake itself stays well inside the
+// grace period.
+func TestServerHandshakeTimeoutClearedAfterHandshake(t *testing.T) {
+	signer, err := generateSigner()
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &Server{
+		HandshakeTimeout: time.Second,
+		IdleTimeout:      time.Minute,
+		Handler: func(s Session) {
+			time.Sleep(1500 * time.Millisecond)
+		},
+	}
+	s.AddHostKey(signer)
+	sess, _, cleanup := newTestSession(t, s, nil)
+	defer cleanup()
+	if err := sess.Run(""); err != nil {
+		t.Fatalf("session run: %v", err)
 	}
 }
