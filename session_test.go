@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"testing"
+	"time"
 
 	gossh "golang.org/x/crypto/ssh"
 )
@@ -465,4 +466,171 @@ func TestBreakWithoutChanRegistered(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected nil but got %v", err)
 	}
+}
+
+// sendRequestWithTimeout sends a global-free session request and waits
+// for its reply, failing the test if the server does not answer in
+// time. It guards against regressions that park the session request
+// loop, which would otherwise hang the test until the global timeout.
+func sendRequestWithTimeout(t *testing.T, session *gossh.Session, name string, payload []byte, timeout time.Duration) (bool, error) {
+	t.Helper()
+	type result struct {
+		ok  bool
+		err error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		ok, err := session.SendRequest(name, true, payload)
+		ch <- result{ok, err}
+	}()
+	select {
+	case r := <-ch:
+		return r.ok, r.err
+	case <-time.After(timeout):
+		return false, fmt.Errorf("timed out waiting for %q reply", name)
+	}
+}
+
+// TestWindowChangeWhenConsumerNotDraining verifies that window-change
+// requests never park the session request loop, even when the session
+// handler never reads the window size channel. Parking the loop would
+// leak one goroutine and its session state per session channel, even
+// after the client disconnects.
+func TestWindowChangeWhenConsumerNotDraining(t *testing.T) {
+	t.Parallel()
+
+	handlerDone := make(chan bool)
+	session, _, cleanup := newTestSession(t, &Server{
+		Handler: func(s Session) {
+			s.Pty() // accept the pty, but never drain the window channel
+			<-handlerDone
+		},
+	}, nil)
+	defer cleanup()
+
+	if err := session.RequestPty("xterm", 80, 40, gossh.TerminalModes{}); err != nil {
+		t.Fatalf("expected nil but got %v", err)
+	}
+	if err := session.Shell(); err != nil {
+		t.Fatalf("expected nil but got %v", err)
+	}
+
+	// The window channel is buffered with capacity one and already
+	// holds the initial pty window size, so this first request must be
+	// answered even though no consumer is reading anything.
+	winchMsg := struct{ W, H, Wpx, Hpx uint32 }{800, 600, 6400, 4800}
+	ok, err := sendRequestWithTimeout(t, session, "window-change", gossh.Marshal(&winchMsg), 10*time.Second)
+	if err != nil {
+		t.Fatalf("expected nil but got %v", err)
+	}
+	if !ok {
+		t.Fatalf("expected true but got %v", ok)
+	}
+
+	// A burst of window-changes must not wedge the request loop either.
+	for i := 0; i < 50; i++ {
+		winchMsg = struct{ W, H, Wpx, Hpx uint32 }{uint32(100 + i), 200, 0, 0}
+		if _, err := session.SendRequest("window-change", false, gossh.Marshal(&winchMsg)); err != nil {
+			t.Fatalf("expected nil but got %v", err)
+		}
+	}
+
+	// The request loop must still be able to process further requests.
+	winchMsg = struct{ W, H, Wpx, Hpx uint32 }{900, 700, 7200, 5600}
+	ok, err = sendRequestWithTimeout(t, session, "window-change", gossh.Marshal(&winchMsg), 10*time.Second)
+	if err != nil {
+		t.Fatalf("expected nil but got %v", err)
+	}
+	if !ok {
+		t.Fatalf("expected true but got %v", ok)
+	}
+
+	close(handlerDone)
+}
+
+// TestBreakWhenConsumerNotDraining verifies that break requests do not
+// park the session request loop when the registered break channel is
+// never drained; the request is answered with a failure reply instead.
+func TestBreakWhenConsumerNotDraining(t *testing.T) {
+	t.Parallel()
+
+	breakChan := make(chan bool) // unbuffered, never read
+	readyToRegisterBreak := make(chan bool)
+	handlerDone := make(chan bool)
+
+	session, _, cleanup := newTestSession(t, &Server{
+		Handler: func(s Session) {
+			s.Break(breakChan)
+			readyToRegisterBreak <- true
+			<-handlerDone
+		},
+	}, nil)
+	defer cleanup()
+
+	var stdout bytes.Buffer
+	session.Stdout = &stdout
+	errChan := make(chan error, 1)
+	go func() {
+		errChan <- session.Run("")
+	}()
+
+	<-readyToRegisterBreak
+	// Break requests must be answered (with ok=false, since the
+	// consumer is not reading) instead of parking the request loop.
+	for i := 0; i < 5; i++ {
+		ok, err := sendRequestWithTimeout(t, session, "break", nil, 10*time.Second)
+		if err != nil {
+			t.Fatalf("expected nil but got %v", err)
+		}
+		if ok {
+			t.Fatalf("expected false but got %v", ok)
+		}
+	}
+
+	close(handlerDone)
+	if err := <-errChan; err != nil {
+		t.Fatalf("expected nil but got %v", err)
+	}
+}
+
+// TestEnvironBounded verifies that a client cannot force unbounded
+// memory growth by sending an endless stream of env requests: only the
+// first maxEnvs variables are accepted, the rest are rejected.
+func TestEnvironBounded(t *testing.T) {
+	t.Parallel()
+
+	envCh := make(chan []string, 1)
+	handlerDone := make(chan bool)
+
+	session, _, cleanup := newTestSession(t, &Server{
+		Handler: func(s Session) {
+			envCh <- s.Environ()
+			<-handlerDone
+		},
+	}, nil)
+	defer cleanup()
+
+	for i := 0; i < maxEnvs+10; i++ {
+		payload := gossh.Marshal(struct{ Key, Value string }{"KEY", fmt.Sprint(i)})
+		ok, err := sendRequestWithTimeout(t, session, "env", payload, 10*time.Second)
+		if err != nil {
+			t.Fatalf("env %d: expected nil but got %v", i, err)
+		}
+		if i < maxEnvs && !ok {
+			t.Fatalf("env %d: expected true but got %v", i, ok)
+		}
+		if i >= maxEnvs && ok {
+			t.Fatalf("env %d: expected false but got %v", i, ok)
+		}
+	}
+
+	if err := session.Shell(); err != nil {
+		t.Fatalf("expected nil but got %v", err)
+	}
+	env := <-envCh
+	if len(env) != maxEnvs {
+		t.Fatalf("expected %d environment entries but got %d", maxEnvs, len(env))
+	}
+
+	close(handlerDone)
 }
