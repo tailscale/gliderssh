@@ -297,6 +297,31 @@ type UnixForwardingOptions struct {
 	// Matches OpenSSH's StreamLocalBindMask.
 	BindMask *os.FileMode
 
+	// SessionUser optionally identifies the local user on whose behalf
+	// forwarding syscalls should run (dial, listen, and socket cleanup).
+	// When uid and gid differ from the server process identity,
+	// supplementary groups are not compared, and those calls are performed
+	// by a per-session privsep child process running as that user
+	// (privilege separation). Matching identities always run in-process.
+	//
+	// The returned groups become the child's only supplementary groups;
+	// return every group the session is entitled to, or dials to
+	// group-owned sockets fail with permission errors.
+	//
+	// Forward failures caused by the child report
+	// errors.Is(err, ErrPrivsepChild). Close reverse-forwarding listeners
+	// via the returned Listener's Close; it performs socket cleanup as
+	// the session user. Duplicating listener fds bypasses that cleanup.
+	//
+	// The child re-executes the host binary: package init work in other
+	// packages runs inside it before forwarding mode takes over, and
+	// spawning fails if the binary cannot be resolved. If the identity
+	// differs and no child can run, such as on platforms without a POSIX
+	// uid model, forwarding fails rather than falling back to in-process
+	// execution with the process's privileges. Leave nil to always run
+	// syscalls in-process.
+	SessionUser func(ctx Context) (uid, gid int, groups []int, err error)
+
 	// PathValidator is an optional additional validation function called
 	// after built-in checks pass. Return an error wrapping ErrRejected
 	// (or a *rejectionError) for "administratively prohibited" semantics,
@@ -471,6 +496,14 @@ func NewLocalUnixForwardingCallback(opts UnixForwardingOptions) LocalUnixForward
 			}
 		}
 
+		h, err := sessionPrivsepChild(ctx, opts)
+		if err != nil {
+			return nil, err
+		}
+		if h != nil {
+			return h.dialConn(resolved)
+		}
+
 		var d net.Dialer
 		return d.DialContext(ctx, "unix", resolved)
 	}
@@ -502,6 +535,14 @@ func NewReverseUnixForwardingCallback(opts UnixForwardingOptions) ReverseUnixFor
 			}
 		}
 
+		h, err := sessionPrivsepChild(ctx, opts)
+		if err != nil {
+			return nil, err
+		}
+		if h != nil {
+			return h.listenConn(cleaned, bindMode(opts), opts.BindUnlink)
+		}
+
 		if opts.BindUnlink {
 			// Only unlink if the existing file is a socket or does
 			// not exist. Regular files and directories are left in
@@ -522,13 +563,7 @@ func NewReverseUnixForwardingCallback(opts UnixForwardingOptions) ReverseUnixFor
 			return nil, fmt.Errorf("failed to listen on unix socket %q: %w", cleaned, err)
 		}
 
-		// Apply socket permission mask. Default 0177 (mode 0600),
-		// matching OpenSSH's StreamLocalBindMask.
-		mask := os.FileMode(0o177)
-		if opts.BindMask != nil {
-			mask = *opts.BindMask
-		}
-		mode := os.FileMode(0o666) &^ mask
+		mode := bindMode(opts)
 		if err := os.Chmod(cleaned, mode); err != nil {
 			_ = ln.Close()
 			return nil, fmt.Errorf("failed to set permissions on socket %q: %w", cleaned, err)
@@ -536,6 +571,16 @@ func NewReverseUnixForwardingCallback(opts UnixForwardingOptions) ReverseUnixFor
 
 		return ln, nil
 	}
+}
+
+// bindMode returns the permission bits for a listening socket. Default 0177
+// mask (mode 0600), matching OpenSSH's StreamLocalBindMask.
+func bindMode(opts UnixForwardingOptions) os.FileMode {
+	mask := os.FileMode(0o177)
+	if opts.BindMask != nil {
+		mask = *opts.BindMask
+	}
+	return os.FileMode(0o666) &^ mask
 }
 
 // UserSocketDirectories returns common socket directory prefixes for a user,
