@@ -241,6 +241,48 @@ func TestPty(t *testing.T) {
 	<-done
 }
 
+// TestSendWindowConsumerDrainsBeforeDrop forces the consumer to take the old
+// size after the first nonblocking send fails but before sendWindow attempts
+// to discard it. The latest size must still remain available to the consumer.
+func TestSendWindowConsumerDrainsBeforeDrop(t *testing.T) {
+	old, latest := Window{Width: 40, Height: 80}, Window{Width: 80, Height: 160}
+	gate, resume, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	sess := &session{
+		winch: make(chan Window, 1),
+		winchDrainTestGate: func() {
+			close(gate)
+			<-resume
+		},
+	}
+	sess.winch <- old
+	go func() {
+		sess.sendWindow(latest)
+		close(done)
+	}()
+	select {
+	case <-gate:
+	case <-time.After(5 * time.Second):
+		t.Fatal("sendWindow did not reach the full-buffer path")
+	}
+	if got := <-sess.winch; got != old {
+		t.Fatalf("first size = %#v; want %#v", got, old)
+	}
+	close(resume)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("sendWindow blocked after the consumer drained the channel")
+	}
+	select {
+	case got := <-sess.winch:
+		if got != latest {
+			t.Fatalf("last size = %#v; want %#v", got, latest)
+		}
+	default:
+		t.Fatalf("latest window size %#v was lost", latest)
+	}
+}
+
 func TestPtyResize(t *testing.T) {
 	t.Parallel()
 	winch0 := Window{Width: 40, Height: 80}
