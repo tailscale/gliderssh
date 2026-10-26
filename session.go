@@ -130,6 +130,7 @@ type session struct {
 	exited              bool
 	pty                 *Pty
 	winch               chan Window
+	winchDrainTestGate  func() // Gates the full-buffer path in tests only.
 	env                 []string
 	ptyCb               PtyCallback
 	sessReqCb           SessionRequestCallback
@@ -152,12 +153,17 @@ func (sess *session) sendWindow(win Window) {
 	case sess.winch <- win:
 	default:
 		// Buffer full: drop the stale entry and try once more.
+		if sess.winchDrainTestGate != nil {
+			sess.winchDrainTestGate()
+		}
 		select {
 		case <-sess.winch:
-			select {
-			case sess.winch <- win:
-			default:
-			}
+		default:
+		}
+		// The consumer may have drained the old value before the select above.
+		// Retry regardless of which side drained it.
+		select {
+		case sess.winch <- win:
 		default:
 		}
 	}
