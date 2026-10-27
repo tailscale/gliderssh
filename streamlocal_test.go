@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"os"
 	"path/filepath"
@@ -28,8 +29,7 @@ import (
 func tempDirUnixSocket(t *testing.T) string {
 	t.Helper()
 	if runtime.GOOS == "darwin" {
-		testName := strings.ReplaceAll(t.Name(), "/", "_")
-		dir, err := os.MkdirTemp("/tmp", fmt.Sprintf("gliderlabs-ssh-test-%s-", testName))
+		dir, err := os.MkdirTemp("/tmp", "gssh-")
 		if err != nil {
 			t.Fatalf("create temp dir for test: %v", err)
 		}
@@ -868,6 +868,78 @@ func TestNewReverseUnixForwardingCallbackSocketPermissions(t *testing.T) {
 				t.Fatalf("socket permissions = %04o; want %04o", perm, tt.wantPerm)
 			}
 		})
+	}
+}
+
+func TestNewReverseUnixForwardingCallbackSocketOwner(t *testing.T) {
+	t.Parallel()
+
+	dir := tempDirUnixSocket(t)
+	sockPath := filepath.Join(dir, "owned.sock")
+	resolvedDir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantPath := filepath.Join(resolvedDir, "owned.sock")
+	ctx, cancel := newContext(nil)
+	defer cancel()
+
+	cb := NewReverseUnixForwardingCallback(UnixForwardingOptions{
+		AllowAll: true,
+		BindOwner: &UnixSocketOwner{
+			UID: os.Getuid(),
+			GID: os.Getgid(),
+		},
+	})
+	ln, err := cb(ctx, sockPath)
+	if err != nil {
+		t.Fatalf("failed to listen: %v", err)
+	}
+	if got := ln.Addr().String(); got != wantPath {
+		t.Errorf("listener address = %q, want %q", got, wantPath)
+	}
+	if err := ln.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if _, err := os.Lstat(sockPath); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("socket still exists after Close: %v", err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("socket directory contains staging leftovers: %v", entries)
+	}
+}
+
+func TestNewReverseUnixForwardingCallbackAllowAllSymlinkedParent(t *testing.T) {
+	t.Parallel()
+
+	dir := tempDirUnixSocket(t)
+	realDir := filepath.Join(dir, "real")
+	if err := os.Mkdir(realDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	linkDir := filepath.Join(dir, "link")
+	if err := os.Symlink(realDir, linkDir); err != nil {
+		t.Fatal(err)
+	}
+	resolvedRealDir, err := filepath.EvalSymlinks(realDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantPath := filepath.Join(resolvedRealDir, "s")
+
+	ctx, cancel := newContext(nil)
+	defer cancel()
+	ln, err := NewReverseUnixForwardingCallback(UnixForwardingOptions{AllowAll: true})(ctx, filepath.Join(linkDir, "s"))
+	if err != nil {
+		t.Fatalf("failed to listen through symlinked parent: %v", err)
+	}
+	defer ln.Close() //nolint:errcheck
+	if got := ln.Addr().String(); got != wantPath {
+		t.Errorf("listener address = %q, want resolved path %q", got, wantPath)
 	}
 }
 

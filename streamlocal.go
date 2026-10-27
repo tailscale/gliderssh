@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io/fs"
 	"net"
 	"os"
 	"path/filepath"
@@ -297,11 +296,22 @@ type UnixForwardingOptions struct {
 	// Matches OpenSSH's StreamLocalBindMask.
 	BindMask *os.FileMode
 
+	// BindOwner, if non-nil, sets the owner of a reverse-forwarding socket
+	// before it is made visible at the requested path.
+	BindOwner *UnixSocketOwner
+
 	// PathValidator is an optional additional validation function called
 	// after built-in checks pass. Return an error wrapping ErrRejected
 	// (or a *rejectionError) for "administratively prohibited" semantics,
 	// or any other error for "connection failed."
 	PathValidator func(ctx Context, socketPath string) error
+}
+
+// UnixSocketOwner identifies the owner to assign to a reverse-forwarding
+// Unix socket.
+type UnixSocketOwner struct {
+	UID int
+	GID int
 }
 
 // validateSocketPath checks that socketPath is safe according to opts.
@@ -410,8 +420,6 @@ func validateAndResolveListenPath(socketPath string, opts UnixForwardingOptions)
 	cleaned, err := validateSocketPath(socketPath, opts)
 	if err != nil {
 		return "", err
-	} else if opts.AllowAll {
-		return cleaned, nil
 	}
 
 	dir := filepath.Dir(cleaned)
@@ -424,10 +432,12 @@ func validateAndResolveListenPath(socketPath string, opts UnixForwardingOptions)
 	}
 
 	resolved := filepath.Join(resolvedDir, filepath.Base(cleaned))
-	opts.AllowedDirectories = resolvePrefixes(opts.AllowedDirectories)
-	opts.DeniedPrefixes = resolvePrefixes(opts.DeniedPrefixes)
-	if _, err := validateSocketPath(resolved, opts); err != nil {
-		return "", err
+	if !opts.AllowAll {
+		opts.AllowedDirectories = resolvePrefixes(opts.AllowedDirectories)
+		opts.DeniedPrefixes = resolvePrefixes(opts.DeniedPrefixes)
+		if _, err := validateSocketPath(resolved, opts); err != nil {
+			return "", err
+		}
 	}
 	// Technically a symlink wont be able to bind(), but for clarity and defense in depth check it
 	if info, err := os.Lstat(resolved); err == nil && info.Mode().Type() == os.ModeSymlink {
@@ -502,26 +512,6 @@ func NewReverseUnixForwardingCallback(opts UnixForwardingOptions) ReverseUnixFor
 			}
 		}
 
-		if opts.BindUnlink {
-			// Only unlink if the existing file is a socket or does
-			// not exist. Regular files and directories are left in
-			// place so that net.Listen fails with EADDRINUSE rather
-			// than silently deleting user data.
-			if info, serr := os.Lstat(cleaned); serr == nil {
-				if info.Mode().Type() == os.ModeSocket {
-					if uerr := unlink(cleaned); uerr != nil && !errors.Is(uerr, fs.ErrNotExist) {
-						return nil, fmt.Errorf("failed to unlink existing socket %q: %w", cleaned, uerr)
-					}
-				}
-			}
-		}
-
-		lc := &net.ListenConfig{}
-		ln, err := lc.Listen(ctx, "unix", cleaned)
-		if err != nil {
-			return nil, fmt.Errorf("failed to listen on unix socket %q: %w", cleaned, err)
-		}
-
 		// Apply socket permission mask. Default 0177 (mode 0600),
 		// matching OpenSSH's StreamLocalBindMask.
 		mask := os.FileMode(0o177)
@@ -529,12 +519,7 @@ func NewReverseUnixForwardingCallback(opts UnixForwardingOptions) ReverseUnixFor
 			mask = *opts.BindMask
 		}
 		mode := os.FileMode(0o666) &^ mask
-		if err := os.Chmod(cleaned, mode); err != nil {
-			_ = ln.Close()
-			return nil, fmt.Errorf("failed to set permissions on socket %q: %w", cleaned, err)
-		}
-
-		return ln, nil
+		return listenUnixSocket(ctx, cleaned, mode, opts)
 	}
 }
 
